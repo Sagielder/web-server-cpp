@@ -12,7 +12,25 @@
 #define PORT 8080
 #define MAX_EVENTS 10
 #define BUFFER_SIZE 1024
+#define INITIAL_CAPACITY 4096
 
+// Client connection state tracking
+typedef struct{
+    int fd;
+    char *buf;
+    size_t len;
+    size_t capacity;
+} client_state_t;
+
+// clean up client state and close connection
+// helper function
+void clean_up_client_state(int epoll_fd, client_state_t **state_ptr) {
+    epoll_ctl(epoll_fd, EPOLL_CTL_DEL, (*state_ptr)->fd, NULL);
+    close((*state_ptr)->fd);
+    free((*state_ptr)->buf);
+    free(*state_ptr);
+    *state_ptr = NULL;
+}
 
 int make_socket_non_blocking(int fd) {
     // get all existing flags
@@ -98,6 +116,8 @@ int main() {
     }
 
     struct epoll_event events[MAX_EVENTS];
+
+    
     
     while (1) {
         // blocks until at least one socket has activity
@@ -139,6 +159,19 @@ int main() {
                         close(client_fd);
                         continue;
                     }
+                    
+                    // create new client state for new client
+                    client_state_t *state = malloc(sizeof(client_state_t));
+                    if (!state) {
+                        close(client_fd);
+                        continue;
+                    }
+                    state->buf = malloc(INITIAL_CAPACITY);
+                    if (!state->buf) {
+                        free(state);
+                        close(client_fd);
+                        continue;
+                    }
 
                     // Register the new client socket with epoll
                     // EPOLLET switch monitoring from level-trigger(default) to edge-triggered
@@ -149,7 +182,7 @@ int main() {
                     // edge-triggered = must loop read() until it returns EAGAIN or EWOULDBLOCK
                     struct epoll_event ev;
                     ev.events = EPOLLIN | EPOLLET; // Read events + Edge-Triggered mode (optional, standard for high perf)
-                    ev.data.fd = client_fd;        // Tag this event with the client's FD!
+                    ev.data.ptr = state;           // make data.ptr point to the client state
 
                     if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &ev) == -1) {
                         perror("epoll_ctl: client_fd failed");
@@ -163,15 +196,29 @@ int main() {
             } else {
                 // existing connections
                 int client_fd = events[i].data.fd;
-                char buffer[BUFFER_SIZE];
+                char temp_buf[BUFFER_SIZE];
                 int connection_closed = 0;
+                client_state_t *state = (client_state_t *)events[i].data.ptr;
                 
                 while (1) {
-                    ssize_t bytes_read = read(client_fd, buffer, sizeof(buffer) - 1);
+                    ssize_t bytes_read = read(client_fd, temp_buf, sizeof(temp_buf));
 
                     if (bytes_read > 0) {
-                        buffer[bytes_read] = '\0';
-                        printf("Read %zd bytes on fd %d: %s\n", bytes_read, client_fd, buffer);
+                        // expand client state buffer if needed
+                        if (state->len + bytes_read >= state->capacity) {
+                            size_t new_capacity = state->capacity * 2;
+                            char *new_buf = realloc(state->buf, new_capacity);
+                            if (!new_buf) {
+                                perror("realloc failed");
+                                clean_up_client_state(epoll_fd, &state);
+                                break;
+                            }
+                            state->buf = new_buf;
+                            state->capacity = new_capacity;
+                        }
+                        
+                        memcpy(state->buf + state->len, temp_buf, bytes_read);
+                        state->len += bytes_read;
                     } else if (bytes_read == 0) {
                         // Client closed the connection cleanly (EOF)
                         printf("Client fd %d disconnected\n", client_fd);
@@ -197,8 +244,7 @@ int main() {
 
                 // clean up if client disconnect/socket error
                 if (connection_closed) {
-                    epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, NULL);
-                    close(client_fd);
+                    clean_up_client_state(epoll_fd, &state);
                 } else {
                     // entire request has been read
                     // send your HTTP response and close the socket
@@ -210,8 +256,7 @@ int main() {
                         "Hello, World!";
                     write(client_fd, response, strlen(response));
                     
-                    epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, NULL);
-                    close(client_fd);
+                    clean_up_client_state(epoll_fd, &state);
                 }
             }
         }
