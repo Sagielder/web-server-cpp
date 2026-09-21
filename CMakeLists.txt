@@ -16,4 +16,5 @@ add_executable(webserver
 )
 
 target_include_directories(webserver PRIVATE src)
+target_include_directories(webserver SYSTEM PRIVATE packages)
 

@@ -7,14 +7,16 @@
 #include <stdexcept>
 #include <cstring>
 #include <sys/uio.h>
+#include "router.hpp"
 
 class Server {
 private:
 MyFileDescriptor m_listen_socket;
 EpollReactor m_epoll_reactor;
 std::unordered_map<int, std::unique_ptr<Connection>> m_connections;
+Router m_router;
 public:
-    Server(int port) : m_listen_socket(socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0)) {
+    Server(int port, Router router) : m_listen_socket(socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0)), m_router(std::move(router)) {
         if (m_listen_socket.GetFileDescriptor() < 0) {
             throw std::runtime_error(std::string("socket creation failed: ") + std::strerror(errno));
         }
@@ -85,36 +87,20 @@ public:
                     ConnectionState conn_state = conn->Read();
                     if (conn_state == ConnectionState::RequestComplete) {
                         // route
-                        // if post return the body
-                        // else return just 200 OK
-                        if (conn->GetRequest()->request_line.method == HttpMethod::POST) {
-                            std::string_view body = conn->GetRequest()->body;
+                        Response res = m_router.Dispatch(*conn->GetRequest());
+                        std::string headers = 
+                        "HTTP/1.1 " + std::to_string(res.status_code) + " " + res.response_phrase + "\r\n"
+                        "Content-Type:" + res.content_type + "\r\n"
+                        "Content-Length:" + std::to_string(res.body.size()) + "\r\n"
+                        "\r\n";
+                        struct iovec iov[2];
+                        iov[0].iov_base = const_cast<char*>(headers.data());
+                        iov[0].iov_len  = headers.size();
+                        iov[1].iov_base = const_cast<char*>(res.body.data());
+                        iov[1].iov_len  = res.body.size();
 
-                            std::string headers = 
-                                "HTTP/1.1 200 OK\r\n"
-                                "Content-Type:text/plain\r\n"
-                                "Content-Length:" + std::to_string(body.size()) + "\r\n"
-                                "\r\n";
-
-                            // Scatter-Gather I/O, writev allows us to
-                            // instead of creating one string buffer to hold both data
-                            // use data in separate memory spaces and combine them on the fly 
-                            struct iovec iov[2];
-                            iov[0].iov_base = const_cast<char*>(headers.data());
-                            iov[0].iov_len  = headers.size();
-                            iov[1].iov_base = const_cast<char*>(body.data());
-                            iov[1].iov_len  = body.size();
-
-                            writev(client_fd, iov, 2);
-
-                        } else {
-                            const char *response = 
-                            "HTTP/1.1 200 OK\r\n"
-                            "Content-Length: 0\r\n"
-                            "\r\n";
-                            write(client_fd, response, strlen(response));
-                        }
-                        
+                        writev(client_fd, iov, 2);
+                    
                         m_connections.erase(client_fd);
                     } else if (conn_state == ConnectionState::ConnectionClosed) {
                         m_connections.erase(client_fd);
