@@ -101,7 +101,7 @@ ssize_t m_header_begin_index;
 std::uint8_t m_state; // 0 - no match, 1 - match first, 2 - match second, ... so on   
 Request m_request;
 ssize_t m_content_length;
-
+bool m_keep_alive; 
 private:
     bool FindHeaderEnding(const ssize_t& read_size) {
         // \r\n\r\n
@@ -285,6 +285,17 @@ private:
 
 public:
 
+    void Reset() {
+        m_header_end_index = -1;
+        m_state = 0;
+        m_content_length = -1;
+        m_header_begin_index = -1;
+        m_buffer.clear();
+        m_buffer.shrink_to_fit();
+        m_request.headers.clear();
+        m_keep_alive = false;
+    }
+
     int GetFileDescriptor() {
         return m_client_socket.GetFileDescriptor();
     }
@@ -294,6 +305,7 @@ public:
         m_state = 0;
         m_content_length = -1;
         m_header_begin_index = -1;
+        m_keep_alive = false;
     };
 
 
@@ -313,6 +325,14 @@ public:
                 return ConnectionState::BadRequest;
             }
             if (!m_request.headers.empty() || FindHeaderEnding(bytes_read)) {
+                HeaderField* keep_alive_header = GetHeaderByName("Connection");
+                if (keep_alive_header == nullptr) {
+                    m_keep_alive = true;
+                } else if (CaseInsensitiveEquals(keep_alive_header->value, "keep-alive")) {
+                    m_keep_alive = true;
+                } else if (CaseInsensitiveEquals(keep_alive_header->value, "close")) {
+                    m_keep_alive = false;
+                }
                 if (m_request.headers.empty() && ExtractHeaders() != RequestParseState::NoErrors) return ConnectionState::BadRequest;
                 if (m_content_length < 0) {
                     HeaderField* content_length_header = GetHeaderByName("Content-Length");
@@ -323,7 +343,7 @@ public:
                     if (m_content_length > MAX_CONTENT_LENGTH) return ConnectionState::PayloadTooLarge; // exceed max content length
                 }
                 
-               
+                
                 
                 if (m_buffer.size() - m_header_end_index - 1 >= static_cast<size_t>(m_content_length)) {
                     m_request.body = std::string_view(m_buffer.data() + m_header_end_index + 1, m_content_length);
@@ -358,4 +378,9 @@ public:
         }
 
     };
+
+    bool GetKeepAlive() {
+        return m_keep_alive;
+    }
+
 };

@@ -8,7 +8,7 @@
 #include <cstring>
 #include <sys/uio.h>
 #include "router.hpp"
-#include <bits/std_thread.h>
+#include <thread>
 
 class Server {
 private:
@@ -91,7 +91,13 @@ private:
                          // route
                         Response res = m_router.Dispatch(*conn->GetRequest());
                         WriteResponse(client_fd, res);
-                        EraseConnFromMap(client_fd);
+                        if (conn->GetKeepAlive()) {
+                            // keep alive
+                            conn->Reset();
+                            m_epoll_reactor.Modify(client_fd, EPOLLIN | EPOLLET | EPOLLONESHOT);
+                        } else {
+                            EraseConnFromMap(client_fd);
+                        }
                         break;
                     }
                     case ConnectionState::BadRequest:

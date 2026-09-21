@@ -10,7 +10,7 @@ class EpollReactor
 {
 private:
     MyFileDescriptor m_epoll_fd;
-    static constexpr int MAX_EVENTS = 10;
+    static constexpr int MAX_EVENTS = 128;
 
 public:
     EpollReactor() : m_epoll_fd(epoll_create1(0)) {
