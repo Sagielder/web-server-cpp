@@ -2,7 +2,6 @@
 #include "file_descriptor.hpp"
 #include <sys/epoll.h>
 #include <vector>
-#include <span>
 #include <stdexcept>
 #include <cerrno>
 #include <cstring>
@@ -11,15 +10,13 @@ class EpollReactor
 {
 private:
     MyFileDescriptor m_epoll_fd;
-    static constexpr int INI_EVENT_SIZE = 10;
-    std::vector<epoll_event> m_events;
+    static constexpr int MAX_EVENTS = 10;
 
 public:
     EpollReactor() : m_epoll_fd(epoll_create1(0)) {
         if (m_epoll_fd.GetFileDescriptor() == -1) {
             throw std::runtime_error(std::string("epoll_create1 failed: ") + std::strerror(errno));
         }
-        m_events.resize(INI_EVENT_SIZE);
     }
 
     ~EpollReactor() = default;
@@ -42,17 +39,18 @@ public:
         return epoll_ctl(m_epoll_fd.GetFileDescriptor(), EPOLL_CTL_DEL, fd, nullptr);
     }
 
-    // Blocks until at least one fd is ready, then returns a view over
-    // just the ready events (length == nfds, not MAX_EVENTS). The span
-    // is only valid until the next call to Wait().
-    std::span<epoll_event> Wait() {
+    // Blocks until at least one fd is ready
+    // just the ready events (length == nfds, not MAX_EVENTS).
+    std::vector<epoll_event> Wait() {
         while (1) {
-            int nfds = epoll_wait(m_epoll_fd.GetFileDescriptor(), m_events.data(), m_events.size(), -1);
+            std::vector<epoll_event> events(MAX_EVENTS);
+            int nfds = epoll_wait(m_epoll_fd.GetFileDescriptor(), events.data(), MAX_EVENTS, -1);
             if (nfds < 0) {
                 if (errno == EINTR) continue; // interrupted by a signal, not a real failure
                 throw std::runtime_error(std::string("epoll_wait failed: ") + std::strerror(errno));
             }
-            return std::span<epoll_event>(m_events.data(), static_cast<size_t>(nfds));
+            events.resize(static_cast<size_t>(nfds));
+            return events;
         }
     }
 };

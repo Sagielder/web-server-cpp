@@ -8,6 +8,7 @@
 #include <cstring>
 #include <sys/uio.h>
 #include "router.hpp"
+#include <bits/std_thread.h>
 
 class Server {
 private:
@@ -15,6 +16,116 @@ MyFileDescriptor m_listen_socket;
 EpollReactor m_epoll_reactor;
 std::unordered_map<int, std::unique_ptr<Connection>> m_connections;
 Router m_router;
+std::mutex m_connections_mutex;
+
+private:
+
+    void EraseConnFromMap(int fd) {
+        m_connections_mutex.lock();
+        m_connections.erase(fd);
+        m_connections_mutex.unlock();
+    }
+    void WorkerLoop() {
+        while (1) {
+            std::vector<epoll_event> events;
+            try {
+                events = m_epoll_reactor.Wait();
+            } catch (const std::exception& e) {
+                std::fprintf(stderr, "WorkerLoop: Wait() failed: %s\n", e.what());
+                continue;
+            }
+            for (epoll_event event : events) {
+                if (event.data.fd == m_listen_socket.GetFileDescriptor()) {
+                    while (1) {
+                        struct sockaddr_in client_addr;
+                        socklen_t client_len = sizeof(client_addr);
+
+                        // accept with non blocking flag
+                        std::unique_ptr<Connection> conn = std::make_unique<Connection>(accept4(m_listen_socket.GetFileDescriptor(), 
+                                (struct sockaddr *)&client_addr, &client_len, SOCK_NONBLOCK));
+                        
+                        if (conn->GetFileDescriptor() == -1) {
+                            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                                // All pending connections accepted
+                                break;
+                            }
+                            perror("accept error");
+                            break;
+                        }
+
+                        // capture the fd before moving conn - conn is null after the move
+                        int new_fd = conn->GetFileDescriptor();
+
+                        // insert into the map before Add() succeeds,
+                        // the fd is immediately visible to epoll_wait() on every thread
+                        m_connections_mutex.lock();
+                        m_connections.try_emplace(new_fd, std::move(conn));
+                        m_connections_mutex.unlock();
+
+                        if (m_epoll_reactor.Add(new_fd, EPOLLIN | EPOLLET | EPOLLONESHOT) == -1) {
+                            perror("epoll_ctl: client_fd failed");
+                            // registration failed
+                            // remove it from the map 
+                            EraseConnFromMap(new_fd);
+                        } else {
+                            printf("New connection accepted: client_fd %d\n", new_fd);
+                        }
+
+                    }
+                } else {
+                    int client_fd = event.data.fd;
+                    m_connections_mutex.lock();
+                    auto it = m_connections.find(client_fd);
+                    if (it == m_connections.end()) {
+                        // shouldn't happen, but don't crash the whole server over one stale event
+                        m_connections_mutex.unlock();
+                        std::fprintf(stderr, "WorkerLoop: got event for untracked fd %d\n", client_fd);
+                        continue;
+                    }
+                    std::unique_ptr<Connection>& conn = it->second;
+                    m_connections_mutex.unlock();
+                    ConnectionState conn_state = conn->Read();
+                    switch (conn_state)
+                    {
+                    case ConnectionState::RequestComplete: {
+                         // route
+                        Response res = m_router.Dispatch(*conn->GetRequest());
+                        WriteResponse(client_fd, res);
+                        EraseConnFromMap(client_fd);
+                        break;
+                    }
+                    case ConnectionState::BadRequest:
+                        // malformed request - connection is alive, tell the client why before closing
+                        WriteResponse(client_fd, Response(400, "Bad Request", "text/plain", "Bad Request"));
+                        EraseConnFromMap(client_fd);
+                        break;
+                    case ConnectionState::URITooLong:
+                        WriteResponse(client_fd, Response(414, "URI Too Long", "text/plain", "URI Too Long"));
+                        EraseConnFromMap(client_fd);
+                        break;
+                    case ConnectionState::PayloadTooLarge:
+                        WriteResponse(client_fd, Response(413, "Payload Too Large", "text/plain", "Payload Too Large"));
+                        EraseConnFromMap(client_fd);
+                        break;
+                    case ConnectionState::ConnectionClosed:
+                        EraseConnFromMap(client_fd);
+                        break;
+                    case ConnectionState::NeedMoreData:
+                        // not finish reading
+                        // rearm it
+                        m_epoll_reactor.Modify(client_fd, EPOLLIN | EPOLLET | EPOLLONESHOT);
+                        break;
+                    default:
+                        break;
+                    }
+                }
+
+            }
+        }
+        
+    };
+
+    
 public:
     void WriteResponse(int client_fd, const Response& res) {
         std::string headers =
@@ -65,61 +176,16 @@ public:
         }
     };
 
-    void Run() {
-        while (1) {
-
-            for (epoll_event event : m_epoll_reactor.Wait()) {
-                if (event.data.fd == m_listen_socket.GetFileDescriptor()) {
-                    while (1) {
-                        struct sockaddr_in client_addr;
-                        socklen_t client_len = sizeof(client_addr);
-
-                        // accept with non blocking flag
-                        std::unique_ptr<Connection> conn = std::make_unique<Connection>(accept4(m_listen_socket.GetFileDescriptor(), 
-                                (struct sockaddr *)&client_addr, &client_len, SOCK_NONBLOCK));
-                        
-                        if (conn->GetFileDescriptor() == -1) {
-                            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                                // All pending connections accepted
-                                break;
-                            }
-                            perror("accept error");
-                            break;
-                        }
-
-                        if (m_epoll_reactor.Add(conn->GetFileDescriptor(), EPOLLIN | EPOLLET | EPOLLONESHOT) == -1) {
-                            perror("epoll_ctl: client_fd failed");
-                        } else {
-                            printf("New connection accepted: client_fd %d\n", conn->GetFileDescriptor());
-                            // try_emplace is safer than emplace, will not destroy the conn if key exists
-                            m_connections.try_emplace(conn->GetFileDescriptor(), std::move(conn));
-                        }
-
-                    }
-                } else {
-                    int client_fd = event.data.fd;
-                    std::unique_ptr<Connection>& conn = m_connections.at(client_fd);
-                    ConnectionState conn_state = conn->Read();
-                    if (conn_state == ConnectionState::RequestComplete) {
-                        // route
-                        Response res = m_router.Dispatch(*conn->GetRequest());
-                        WriteResponse(client_fd, res);
-                        m_connections.erase(client_fd);
-                    } else if (conn_state == ConnectionState::BadRequest) {
-                        // malformed request - connection is alive, tell the client why before closing
-                        WriteResponse(client_fd, Response(400, "Bad Request", "text/plain", "Bad Request"));
-                        m_connections.erase(client_fd);
-                    } else if (conn_state == ConnectionState::ConnectionClosed) {
-                        m_connections.erase(client_fd);
-                    } else {
-                        // not finish reading
-                        // rearm it
-                        m_epoll_reactor.Modify(client_fd, EPOLLIN | EPOLLET | EPOLLONESHOT);
-                    }
-                }
-
-            }
+    void Run(unsigned int thread_count = std::thread::hardware_concurrency()) {
+        if (thread_count == 0) thread_count = 1;
+        std::vector<std::thread> workers;
+        for (unsigned int i = 1; i < thread_count; i++) {
+            workers.emplace_back([this]() {WorkerLoop();});
         }
-        
+        WorkerLoop(); // main thread runs as well
+        // only reached if WorkerLoop() ever returns/throws on the main thread -
+        // required so still-running threads aren't destroyed while joinable
+        for (auto& t : workers) t.join();
     };
-};
+
+    };

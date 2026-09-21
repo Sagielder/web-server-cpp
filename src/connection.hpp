@@ -25,7 +25,9 @@ enum class ConnectionState : std::uint8_t {
     NeedMoreData = 0,
     RequestComplete = 1, // connection close peacfully (EOF)
     ConnectionClosed = 2, // connection disconnected, nothing can be sent back
-    BadRequest = 3 // request was malformed; connection is alive, send an error response before closing
+    BadRequest = 3, // request was malformed; connection is alive, send a 400 before closing
+    URITooLong = 4, // request line exceeded MAX_REQUEST_LINE_LENGTH; send a 414 before closing
+    PayloadTooLarge = 5 // Content-Length exceeded MAX_CONTENT_LENGTH; send a 413 before closing
 };
 
 struct HeaderField {
@@ -305,8 +307,9 @@ public:
             m_buffer.insert(m_buffer.end(), temp_buf, temp_buf + bytes_read);
             RequestParseState parse_result = ExtractRequestLine();
             if (parse_result == RequestParseState::NeedMoreData) return ConnectionState::NeedMoreData;
+            else if (parse_result == RequestParseState::URLTooLong) return ConnectionState::URITooLong;
             else if (parse_result != RequestParseState::NoErrors) {
-                // request line was malformed / too long - connection is still alive, send an error response
+                // request line or headers were malformed - connection is still alive, send an error response
                 return ConnectionState::BadRequest;
             }
             if (!m_request.headers.empty() || FindHeaderEnding(bytes_read)) {
@@ -317,7 +320,7 @@ public:
                     std::from_chars(content_length_header->value.data(),
                         content_length_header->value.data() + content_length_header->value.size(), m_content_length);
                     if (m_content_length < 0) return ConnectionState::BadRequest; // malformed
-                    if (m_content_length > MAX_CONTENT_LENGTH) return ConnectionState::BadRequest; // exceed max content length
+                    if (m_content_length > MAX_CONTENT_LENGTH) return ConnectionState::PayloadTooLarge; // exceed max content length
                 }
                 
                
