@@ -24,7 +24,8 @@ enum class HttpMethod : std::uint8_t {
 enum class ConnectionState : std::uint8_t {
     NeedMoreData = 0,
     RequestComplete = 1, // connection close peacfully (EOF)
-    ConnectionClosed = 2 // connection disconnected 
+    ConnectionClosed = 2, // connection disconnected, nothing can be sent back
+    BadRequest = 3 // request was malformed; connection is alive, send an error response before closing
 };
 
 struct HeaderField {
@@ -305,18 +306,18 @@ public:
             RequestParseState parse_result = ExtractRequestLine();
             if (parse_result == RequestParseState::NeedMoreData) return ConnectionState::NeedMoreData;
             else if (parse_result != RequestParseState::NoErrors) {
-                // need to expand the error close
-                return ConnectionState::ConnectionClosed;
+                // request line was malformed / too long - connection is still alive, send an error response
+                return ConnectionState::BadRequest;
             }
             if (!m_request.headers.empty() || FindHeaderEnding(bytes_read)) {
-                if (m_request.headers.empty() && ExtractHeaders() != RequestParseState::NoErrors) return ConnectionState::ConnectionClosed;
+                if (m_request.headers.empty() && ExtractHeaders() != RequestParseState::NoErrors) return ConnectionState::BadRequest;
                 if (m_content_length < 0) {
                     HeaderField* content_length_header = GetHeaderByName("Content-Length");
                     if (content_length_header == nullptr) return ConnectionState::RequestComplete; // finish reading everything
-                    std::from_chars(content_length_header->value.data(), 
+                    std::from_chars(content_length_header->value.data(),
                         content_length_header->value.data() + content_length_header->value.size(), m_content_length);
-                    if (m_content_length < 0) return ConnectionState::ConnectionClosed; // malformed
-                    if (m_content_length > MAX_CONTENT_LENGTH) return ConnectionState::ConnectionClosed; // exceed max content length
+                    if (m_content_length < 0) return ConnectionState::BadRequest; // malformed
+                    if (m_content_length > MAX_CONTENT_LENGTH) return ConnectionState::BadRequest; // exceed max content length
                 }
                 
                

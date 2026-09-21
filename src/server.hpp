@@ -16,6 +16,21 @@ EpollReactor m_epoll_reactor;
 std::unordered_map<int, std::unique_ptr<Connection>> m_connections;
 Router m_router;
 public:
+    void WriteResponse(int client_fd, const Response& res) {
+        std::string headers =
+            "HTTP/1.1 " + std::to_string(res.status_code) + " " + res.response_phrase + "\r\n"
+            "Content-Type:" + res.content_type + "\r\n"
+            "Content-Length:" + std::to_string(res.body.size()) + "\r\n"
+            "\r\n";
+        struct iovec iov[2];
+        iov[0].iov_base = const_cast<char*>(headers.data());
+        iov[0].iov_len  = headers.size();
+        iov[1].iov_base = const_cast<char*>(res.body.data());
+        iov[1].iov_len  = res.body.size();
+
+        writev(client_fd, iov, 2);
+    }
+
     Server(int port, Router router) : m_listen_socket(socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0)), m_router(std::move(router)) {
         if (m_listen_socket.GetFileDescriptor() < 0) {
             throw std::runtime_error(std::string("socket creation failed: ") + std::strerror(errno));
@@ -88,19 +103,11 @@ public:
                     if (conn_state == ConnectionState::RequestComplete) {
                         // route
                         Response res = m_router.Dispatch(*conn->GetRequest());
-                        std::string headers = 
-                        "HTTP/1.1 " + std::to_string(res.status_code) + " " + res.response_phrase + "\r\n"
-                        "Content-Type:" + res.content_type + "\r\n"
-                        "Content-Length:" + std::to_string(res.body.size()) + "\r\n"
-                        "\r\n";
-                        struct iovec iov[2];
-                        iov[0].iov_base = const_cast<char*>(headers.data());
-                        iov[0].iov_len  = headers.size();
-                        iov[1].iov_base = const_cast<char*>(res.body.data());
-                        iov[1].iov_len  = res.body.size();
-
-                        writev(client_fd, iov, 2);
-                    
+                        WriteResponse(client_fd, res);
+                        m_connections.erase(client_fd);
+                    } else if (conn_state == ConnectionState::BadRequest) {
+                        // malformed request - connection is alive, tell the client why before closing
+                        WriteResponse(client_fd, Response(400, "Bad Request", "text/plain", "Bad Request"));
                         m_connections.erase(client_fd);
                     } else if (conn_state == ConnectionState::ConnectionClosed) {
                         m_connections.erase(client_fd);

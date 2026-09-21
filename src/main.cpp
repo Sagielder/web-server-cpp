@@ -15,6 +15,13 @@ int main(int argc, char *argv[]) {
         return Response(200, "OK", "text/plain", std::string(req.body));
     });
 
+    router.Add(HttpMethod::POST, "/Test", [](const Request& req) {
+        return Response(200, "OK", "text/plain", std::string(req.body));
+    });
+
+    router.Add(HttpMethod::GET, "/Health", [](const Request&) {
+        return Response(200, "OK", "text/plain", "Check");
+    });
     try {
         Server server(port, std::move(router));
         std::printf("Listening on port %d...\n", port);
