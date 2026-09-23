@@ -25,9 +25,10 @@ enum class ConnectionState : std::uint8_t {
     NeedMoreData = 0,
     RequestComplete = 1, // connection close peacfully (EOF)
     ConnectionClosed = 2, // connection disconnected, nothing can be sent back
-    BadRequest = 3, // request was malformed; connection is alive, send a 400 before closing
-    URITooLong = 4, // request line exceeded MAX_REQUEST_LINE_LENGTH; send a 414 before closing
-    PayloadTooLarge = 5 // Content-Length exceeded MAX_CONTENT_LENGTH; send a 413 before closing
+    BadRequest = 3, // request was malformed; 400
+    URITooLong = 4, // request line too large; 414
+    PayloadTooLarge = 5, // Content-Length too large; 413
+    HeaderFieldsTooLarge = 6 // Request Header too large; 431
 };
 
 struct HeaderField {
@@ -95,6 +96,7 @@ MyFileDescriptor m_client_socket;
 static constexpr int TEMP_BUFFER_SIZE = 4096;
 static constexpr int MAX_REQUEST_LINE_LENGTH = 8192;
 static constexpr int MAX_CONTENT_LENGTH = 1048576;
+static constexpr int MAX_HEADER_SIZE = 8192;
 std::vector<char> m_buffer;
 ssize_t m_header_end_index;
 ssize_t m_header_begin_index;
@@ -291,7 +293,6 @@ public:
         m_content_length = -1;
         m_header_begin_index = -1;
         m_buffer.clear();
-        m_buffer.shrink_to_fit();
         m_request.headers.clear();
         m_keep_alive = false;
     }
@@ -350,6 +351,8 @@ public:
                     return ConnectionState::RequestComplete;
                 }
                 else return ConnectionState::NeedMoreData;
+            } else if (m_buffer.size() - m_header_begin_index > MAX_HEADER_SIZE) {
+                return ConnectionState::HeaderFieldsTooLarge;
             } else {
                 // need more data
                 return ConnectionState::NeedMoreData;
