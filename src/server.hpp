@@ -122,7 +122,7 @@ private:
                         m_epoll_reactor.Modify(client_fd, EPOLLIN | EPOLLET | EPOLLONESHOT);
                         break;
                     case ConnectionState::HeaderFieldsTooLarge:
-                        WriteResponse(client_fd, Response(431, "Request Header Fields Too Large", "text/plain", "Request Header Fields Too Large"))
+                        WriteResponse(client_fd, Response(431, "Request Header Fields Too Large", "text/plain", "Request Header Fields Too Large"));
                     default:
                         break;
                     }
