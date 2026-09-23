@@ -324,7 +324,8 @@ public:
                 // request line or headers were malformed - connection is still alive, send an error response
                 return ConnectionState::BadRequest;
             }
-            if (!m_request.headers.empty() || FindHeaderEnding(bytes_read)) {
+            if (!m_request.headers.empty() || FindHeaderEnding(bytes_read)) {      
+                if (m_request.headers.empty() && ExtractHeaders() != RequestParseState::NoErrors) return ConnectionState::BadRequest;
                 HeaderField* keep_alive_header = GetHeaderByName("Connection");
                 if (keep_alive_header == nullptr) {
                     m_keep_alive = true;
@@ -333,7 +334,6 @@ public:
                 } else if (CaseInsensitiveEquals(keep_alive_header->value, "close")) {
                     m_keep_alive = false;
                 }
-                if (m_request.headers.empty() && ExtractHeaders() != RequestParseState::NoErrors) return ConnectionState::BadRequest;
                 if (m_content_length < 0) {
                     HeaderField* content_length_header = GetHeaderByName("Content-Length");
                     if (content_length_header == nullptr) return ConnectionState::RequestComplete; // finish reading everything
